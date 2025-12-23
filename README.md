@@ -32,3 +32,19 @@ To regenerate the TFL API client (e.g., after updating `tfl_swagger.json`):
    ```bash
    swagger generate client -f tfl_swagger.json -t tfl --skip-validation
    ```
+
+## Deployment
+
+You can deploy this application directly to Google Cloud Run from source. This will automatically use the `Dockerfile` to build and deploy the container.
+
+### Deploy from Source
+```bash
+gcloud run deploy tfltt \
+  --source . \
+  --platform managed \
+  --region europe-west1 \
+  --allow-unauthenticated \
+  --set-env-vars TFL_APP_KEY=your_key_here
+```
+
+Replace `your_key_here` with your TfL API key. The application will listen on the `PORT` environment variable provided by Cloud Run (defaulting to 8080).

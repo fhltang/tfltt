@@ -49,12 +49,20 @@ type LineStopPair struct {
 }
 
 func main() {
-	// Read API key from file
-	keyBytes, err := os.ReadFile("app_key.txt")
-	if err != nil {
-		log.Fatalf("Error reading app_key.txt: %v", err)
+	// Read API key from environment variable or file
+	appKey := os.Getenv("TFL_APP_KEY")
+	if appKey == "" {
+		keyBytes, err := os.ReadFile("app_key.txt")
+		if err != nil {
+			log.Printf("Warning: TFL_APP_KEY not set and error reading app_key.txt: %v", err)
+		} else {
+			appKey = strings.TrimSpace(string(keyBytes))
+		}
 	}
-	appKey := strings.TrimSpace(string(keyBytes))
+
+	if appKey == "" {
+		log.Println("Warning: No TfL API key found. API calls may fail.")
+	}
 
 	// Auth writer
 	auth := &AppKeyAuthWriter{AppKey: appKey}
@@ -102,8 +110,13 @@ func main() {
 	http.HandleFunc("/demo", DemoHandler(tflClient))
 	http.HandleFunc("/timetable", TimetableHandler(tflClient))
 
-	log.Println("Starting server on :8080...")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Starting server on :%s...", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
 func DemoHandler(tflClient *client.Tfl) http.HandlerFunc {

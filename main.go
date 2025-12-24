@@ -76,17 +76,33 @@ func main() {
 	// Create client
 	tflClient := client.New(transport, strfmt.Default)
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", DefaultHandler(tflClient.StopPoint))
+
+	http.HandleFunc("/demo", DemoHandler(tflClient.StopPoint))
+	http.HandleFunc("/timetable", TimetableHandler(tflClient))
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Starting server on :%s...", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+func DefaultHandler(stopPointClient stop_point.ClientService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("q")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, "<h1>TFL Timetable Search</h1>")
 		fmt.Fprint(w, "<form method='GET' action='/'>")
 		fmt.Fprintf(w, "<input type='text' name='q' value='%s' placeholder='Enter station name...'>", q)
 		fmt.Fprint(w, "<button type='submit'>Search</button>")
+		fmt.Fprint(w, " <a href='/?q=Richmond'>Demo</a>")
 		fmt.Fprint(w, "</form>")
 
 		if q != "" {
-			pairs, err := getLinesAndStops(tflClient, q, "tube")
+			pairs, err := getLinesAndStops(stopPointClient, q, "tube")
 			if err != nil {
 				fmt.Fprintf(w, "<p style='color:red'>Error: %v</p>", err)
 				return
@@ -105,23 +121,12 @@ func main() {
 			}
 			fmt.Fprint(w, "</ul>")
 		}
-	})
-
-	http.HandleFunc("/demo", DemoHandler(tflClient))
-	http.HandleFunc("/timetable", TimetableHandler(tflClient))
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
 	}
-
-	log.Printf("Starting server on :%s...", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-func DemoHandler(tflClient *client.Tfl) http.HandlerFunc {
+func DemoHandler(stopPointClient stop_point.ClientService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		pairs, err := getLinesAndStops(tflClient, TargetStationName, Mode)
+		pairs, err := getLinesAndStops(stopPointClient, TargetStationName, Mode)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error getting lines and stops for %s: %v", TargetStationName, err), http.StatusInternalServerError)
 			return
@@ -211,12 +216,18 @@ func TimetableHandler(tflClient *client.Tfl) http.HandlerFunc {
 	}
 }
 
-func getLinesAndStops(tflClient *client.Tfl, stationName string, mode string) ([]LineStopPair, error) {
-	matches, err := searchStopPoints(tflClient, stationName, mode)
+func getLinesAndStops(stopPointClient stop_point.ClientService, stationName string, mode string) ([]LineStopPair, error) {
+	searchParams := stop_point.NewStopPointSearchParams()
+	searchParams.Query = stationName
+	searchParams.Modes = []string{mode}
+	searchParams.IncludeHubs = swag.Bool(false)
+
+	searchResp, err := stopPointClient.StopPointSearch(searchParams)
 	if err != nil {
 		return nil, err
 	}
 
+	matches := searchResp.Payload.Matches
 	if len(matches) == 0 {
 		return nil, nil
 	}
@@ -240,7 +251,7 @@ func getLinesAndStops(tflClient *client.Tfl, stationName string, mode string) ([
 	// Fetch all StopPoint details in one batch call
 	params := stop_point.NewStopPointGetParams()
 	params.Ids = ids
-	resp, err := tflClient.StopPoint.StopPointGet(params)
+	resp, err := stopPointClient.StopPointGet(params)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching stop points: %w", err)
 	}
@@ -271,12 +282,12 @@ func getLinesAndStops(tflClient *client.Tfl, stationName string, mode string) ([
 		}
 
 		params.Ids = naptanIDs
-		resp, err = tflClient.StopPoint.StopPointGet(params)
+		resp, err = stopPointClient.StopPointGet(params)
 		if err != nil {
 			return nil, fmt.Errorf("error fetching child stop points: %w", err)
 		}
 		for _, sp := range resp.Payload {
-			if sp.ID == "HUBAMR" && stationName != "Amersham" {
+			if strings.HasPrefix(sp.ID, "HUB") && (stationName != "Amersham" || sp.ID != "HUBAMR") {
 				continue
 			}
 			for _, l := range sp.Lines {
@@ -301,75 +312,4 @@ func getSpecificIDsFromChildren(places []*models.TflAPIPresentationEntitiesPlace
 		ids = append(ids, getSpecificIDsFromChildren(p.Children)...)
 	}
 	return ids
-}
-
-func searchStopPoints(tflClient *client.Tfl, targetStationName string, mode string) ([]*models.TflAPIPresentationEntitiesSearchMatch, error) {
-	searchParams := stop_point.NewStopPointSearchParams()
-	searchParams.Query = targetStationName
-	searchParams.Modes = []string{mode}
-	searchParams.IncludeHubs = swag.Bool(false)
-
-	searchResp, err := tflClient.StopPoint.StopPointSearch(searchParams)
-	if err != nil {
-		return nil, err
-	}
-
-	return searchResp.Payload.Matches, nil
-}
-
-// resolveStopPointID ensures we use a specific Naptan ID instead of a Hub ID for timetables
-func resolveStopPointID(tflClient *client.Tfl, id string, mode string) (string, error) {
-	if !strings.HasPrefix(id, "HUB") {
-		return id, nil
-	}
-
-	params := stop_point.NewStopPointGetParams()
-	// Workaround: The TFL API returns a single object for a single ID, but the generated SDK
-	// expects a JSON array. By requesting two distinct IDs, we force the API to return an array.
-	dummyID := "HUBRMD" // Richmond
-	if id == dummyID {
-		dummyID = "HUBAMR" // Amersham
-	}
-	params.Ids = []string{id, dummyID}
-
-	resp, err := tflClient.StopPoint.StopPointGet(params)
-	if err != nil {
-		return "", err
-	}
-
-	if len(resp.Payload) == 0 {
-		return id, nil
-	}
-
-	// Find the stop point that matches our target ID (since order isn't guaranteed)
-	var targetSP *models.TflAPIPresentationEntitiesStopPoint
-	for _, sp := range resp.Payload {
-		if strings.EqualFold(sp.ID, id) {
-			targetSP = sp
-			break
-		}
-	}
-
-	if targetSP == nil {
-		// Fallback to first item if match not found
-		targetSP = resp.Payload[0]
-	}
-
-	if deepID := findDeepID(targetSP.Children); deepID != "" {
-		return deepID, nil
-	}
-
-	return id, nil
-}
-
-func findDeepID(places []*models.TflAPIPresentationEntitiesPlace) string {
-	for _, p := range places {
-		if strings.HasPrefix(p.ID, "940G") {
-			return p.ID
-		}
-		if id := findDeepID(p.Children); id != "" {
-			return id
-		}
-	}
-	return ""
 }

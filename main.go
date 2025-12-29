@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
@@ -80,6 +79,7 @@ func main() {
 
 	http.HandleFunc("/demo", DemoHandler(tflClient.StopPoint))
 	http.HandleFunc("/timetable", TimetableHandler(tflClient))
+	http.HandleFunc("/routes", RoutesHandler(tflClient))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -99,6 +99,7 @@ func DefaultHandler(stopPointClient stop_point.ClientService) http.HandlerFunc {
 		fmt.Fprintf(w, "<input type='text' name='q' value='%s' placeholder='Enter station name...'>", q)
 		fmt.Fprint(w, "<button type='submit'>Search</button>")
 		fmt.Fprint(w, " <a href='/?q=Richmond'>Demo</a>")
+		fmt.Fprint(w, " <a href='/routes'>Routes</a>")
 		fmt.Fprint(w, "</form>")
 
 		if q != "" {
@@ -148,59 +149,27 @@ func DemoHandler(stopPointClient stop_point.ClientService) http.HandlerFunc {
 
 func TimetableHandler(tflClient *client.Tfl) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		lineID := r.URL.Query().Get("line_id")
-		stopPointID := r.URL.Query().Get("stop_point_id")
+		lineID := r.URL.Query().Get("line")
+		fromID := r.URL.Query().Get("from")
+		toID := r.URL.Query().Get("to")
 
-		if lineID == "" || stopPointID == "" {
-			http.Error(w, "Missing line_id or stop_point_id", http.StatusBadRequest)
+		if lineID == "" || fromID == "" || toID == "" {
+			http.Error(w, "Missing required parameters: line, from, to", http.StatusBadRequest)
 			return
 		}
 
-		// 2. Get Line ID Timetable from target station
-		timetableParams := line.NewLineTimetableParams()
-		timetableParams.ID = lineID
-		timetableParams.FromStopPointID = stopPointID
+		params := line.NewLineTimetableToParams()
+		params.ID = lineID
+		params.FromStopPointID = fromID
+		params.ToStopPointID = toID
 
-		timetableResp, err := tflClient.Line.LineTimetable(timetableParams)
+		timetableResp, err := tflClient.Line.LineTimetableTo(params)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error getting timetable: %v", err), http.StatusInternalServerError)
 			return
 		}
 
 		payload := timetableResp.Payload
-		// 3. Handle Disambiguation if needed
-		if payload.Timetable == nil && payload.Disambiguation != nil && len(payload.Disambiguation.DisambiguationOptions) > 0 {
-			option := payload.Disambiguation.DisambiguationOptions[0]
-			u, err := url.Parse(option.URI)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Error parsing disambiguation URI: %v", err), http.StatusInternalServerError)
-				return
-			}
-			queryParams := u.Query()
-
-			timetableResp, err = tflClient.Line.LineTimetable(timetableParams, func(op *runtime.ClientOperation) {
-				originalWriter := op.Params
-				op.Params = runtime.ClientRequestWriterFunc(func(r runtime.ClientRequest, reg strfmt.Registry) error {
-					if err := originalWriter.WriteToRequest(r, reg); err != nil {
-						return err
-					}
-					for k, vs := range queryParams {
-						for _, v := range vs {
-							if err := r.SetQueryParam(k, v); err != nil {
-								return err
-							}
-						}
-					}
-					return nil
-				})
-			})
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Error getting disambiguated timetable: %v", err), http.StatusInternalServerError)
-				return
-			}
-			payload = timetableResp.Payload
-		}
-
 		if payload != nil {
 			renderer, err := NewTimetableRenderer(payload)
 			if err != nil {
@@ -209,7 +178,7 @@ func TimetableHandler(tflClient *client.Tfl) http.HandlerFunc {
 			}
 			output := renderer.RenderAsText(200, 50)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(w, "<html><body><h1>Timetable for %s</h1><pre>%s</pre></body></html>", stopPointID, output)
+			fmt.Fprintf(w, "<html><body><h1>Timetable for %s from %s to %s</h1><pre>%s</pre></body></html>", lineID, fromID, toID, output)
 		} else {
 			http.Error(w, "No timetable payload received", http.StatusNoContent)
 		}
@@ -312,4 +281,34 @@ func getSpecificIDsFromChildren(places []*models.TflAPIPresentationEntitiesPlace
 		ids = append(ids, getSpecificIDsFromChildren(p.Children)...)
 	}
 	return ids
+}
+
+func RoutesHandler(tflClient *client.Tfl) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		params := line.NewLineRouteByModeParams()
+		params.Modes = []string{"tube"}
+
+		resp, err := tflClient.Line.LineRouteByMode(params)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error fetching routes: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, "<html><body><h1>Tube Lines and Routes</h1><ul>")
+
+		for _, l := range resp.Payload {
+			fmt.Fprintf(w, "<li>%s<ul>", l.Name)
+			for _, route := range l.RouteSections {
+				// Construct link to timetable
+				// /timetable?line={lineID}&from={originationName}&to={destinationName}
+				// Note: Using Names or IDs? The prompt says "from and to take naptan station ID".
+				// RouteSections has Originator (ID) and Destination (ID).
+				href := fmt.Sprintf("/timetable?line=%s&from=%s&to=%s", l.ID, route.Originator, route.Destination)
+				fmt.Fprintf(w, "<li><a href='%s'>%s</a></li>", href, route.Name)
+			}
+			fmt.Fprint(w, "</ul></li>")
+		}
+		fmt.Fprint(w, "</ul></body></html>")
+	}
 }

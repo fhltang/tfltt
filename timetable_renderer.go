@@ -21,26 +21,10 @@ type TimetableRenderer struct {
 	intervalData map[int32]map[string]float64
 }
 
-func NewTimetableRenderer(timetableResponse *models.TflAPIPresentationEntitiesTimetableResponse) (*TimetableRenderer, error) {
-	if timetableResponse.Timetable == nil || len(timetableResponse.Timetable.Routes) == 0 {
+func NewTimetableRenderer(timetableResponse *models.TflAPIPresentationEntitiesTimetableResponse, targetRoute *models.TflAPIPresentationEntitiesTimetableRoute, schedule *models.TflAPIPresentationEntitiesSchedule) (*TimetableRenderer, error) {
+	if timetableResponse.Timetable == nil {
 		return nil, fmt.Errorf("no timetable data available")
 	}
-
-	// Find the first route with schedules
-	var targetRoute *models.TflAPIPresentationEntitiesTimetableRoute
-	for _, r := range timetableResponse.Timetable.Routes {
-		if len(r.Schedules) > 0 {
-			targetRoute = r
-			break
-		}
-	}
-
-	if targetRoute == nil {
-		return nil, fmt.Errorf("no schedules found in any route")
-	}
-
-	// Use the first schedule
-	schedule := targetRoute.Schedules[0]
 
 	// Prepare name lookup map
 	stationNames := make(map[string]string)

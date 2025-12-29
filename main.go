@@ -9,6 +9,7 @@ import (
 
 	"tfltt/tfl/client"
 	"tfltt/tfl/client/line"
+	"tfltt/tfl/models"
 
 	"github.com/go-openapi/runtime"
 	httptransport "github.com/go-openapi/runtime/client"
@@ -99,14 +100,30 @@ func TimetableHandler(tflClient *client.Tfl) http.HandlerFunc {
 
 		payload := timetableResp.Payload
 		if payload != nil {
-			renderer, err := NewTimetableRenderer(payload)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Error creating timetable renderer: %v", err), http.StatusInternalServerError)
-				return
-			}
-			output := renderer.RenderAsText(200, 50)
+			var sb strings.Builder
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(w, "<html><body><h1>Timetable for %s from %s to %s</h1><pre>%s</pre></body></html>", lineID, fromID, toID, output)
+			fmt.Fprintf(w, "<html><body><h1>Timetable for %s from %s to %s</h1>", lineID, fromID, toID)
+
+			if payload.Timetable != nil {
+				for _, route := range payload.Timetable.Routes {
+					for _, schedule := range route.Schedules {
+						renderer, err := NewTimetableRenderer(payload, route, schedule)
+						if err != nil {
+							fmt.Fprintf(&sb, "<p>Error rendering schedule %s: %v</p>", schedule.Name, err)
+							continue
+						}
+						output := renderer.RenderAsText(200, 50)
+						fmt.Fprintf(&sb, "<h2>Schedule: %s</h2><pre>%s</pre>", schedule.Name, output)
+					}
+				}
+			}
+
+			if sb.Len() > 0 {
+				fmt.Fprint(w, sb.String())
+			} else {
+				fmt.Fprint(w, "<p>No schedules found.</p>")
+			}
+			fmt.Fprint(w, "</body></html>")
 		} else {
 			http.Error(w, "No timetable payload received", http.StatusNoContent)
 		}
@@ -125,20 +142,77 @@ func DefaultHandler(tflClient *client.Tfl) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, "<html><body><h1>Tube Lines and Routes</h1><ul>")
+		fmt.Fprint(w, "<html><head><style>table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid black; padding: 8px; text-align: left; } th { background-color: #f2f2f2; }</style></head><body>")
+		fmt.Fprint(w, "<h1>Tube Lines and Routes</h1>")
+		fmt.Fprint(w, "<table>")
+		fmt.Fprint(w, "<thead><tr><th>Line</th><th>Outbound</th><th>Inbound</th></tr></thead>")
+		fmt.Fprint(w, "<tbody>")
 
 		for _, l := range resp.Payload {
-			fmt.Fprintf(w, "<li>%s<ul>", l.Name)
-			for _, route := range l.RouteSections {
-				// Construct link to timetable
-				// /timetable?line={lineID}&from={originationName}&to={destinationName}
-				// Note: Using Names or IDs? The prompt says "from and to take naptan station ID".
-				// RouteSections has Originator (ID) and Destination (ID).
-				href := fmt.Sprintf("/timetable?line=%s&from=%s&to=%s", l.ID, route.Originator, route.Destination)
-				fmt.Fprintf(w, "<li><a href='%s'>%s</a></li>", href, route.Name)
+			// Group routes by segment (Origin <-> Destination)
+			type routePair struct {
+				Outbound *models.TflAPIPresentationEntitiesMatchedRoute
+				Inbound  *models.TflAPIPresentationEntitiesMatchedRoute
 			}
-			fmt.Fprint(w, "</ul></li>")
+
+			segments := make(map[string]*routePair)
+			var segmentKeys []string
+
+			for _, route := range l.RouteSections {
+				// Create a unique key for the segment, independent of direction
+				key := route.Originator + "-" + route.Destination
+				if route.Originator > route.Destination {
+					key = route.Destination + "-" + route.Originator
+				}
+
+				if _, exists := segments[key]; !exists {
+					segments[key] = &routePair{}
+					segmentKeys = append(segmentKeys, key)
+				}
+
+				pair := segments[key]
+				if strings.ToLower(route.Direction) == "outbound" {
+					pair.Outbound = route
+				} else if strings.ToLower(route.Direction) == "inbound" {
+					pair.Inbound = route
+				} else {
+					if pair.Outbound == nil {
+						pair.Outbound = route
+					} else {
+						pair.Inbound = route
+					}
+				}
+			}
+
+			// Render rows for this line
+			firstRow := true
+			for _, key := range segmentKeys {
+				pair := segments[key]
+				fmt.Fprint(w, "<tr>")
+				if firstRow {
+					fmt.Fprintf(w, "<td rowspan='%d'>%s</td>", len(segmentKeys), l.Name)
+					firstRow = false
+				}
+
+				// Outbound Cell
+				fmt.Fprint(w, "<td>")
+				if pair.Outbound != nil {
+					href := fmt.Sprintf("/timetable?line=%s&from=%s&to=%s", l.ID, pair.Outbound.Originator, pair.Outbound.Destination)
+					fmt.Fprintf(w, "<a href='%s'>%s</a>", href, pair.Outbound.Name)
+				}
+				fmt.Fprint(w, "</td>")
+
+				// Inbound Cell
+				fmt.Fprint(w, "<td>")
+				if pair.Inbound != nil {
+					href := fmt.Sprintf("/timetable?line=%s&from=%s&to=%s", l.ID, pair.Inbound.Originator, pair.Inbound.Destination)
+					fmt.Fprintf(w, "<a href='%s'>%s</a>", href, pair.Inbound.Name)
+				}
+				fmt.Fprint(w, "</td>")
+
+				fmt.Fprint(w, "</tr>")
+			}
 		}
-		fmt.Fprint(w, "</ul></body></html>")
+		fmt.Fprint(w, "</tbody></table></body></html>")
 	}
 }

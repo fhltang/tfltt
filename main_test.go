@@ -40,7 +40,13 @@ func TestRenderTimetableTable(t *testing.T) {
 				t.Fatalf("Failed to unmarshal test data: %v", err)
 			}
 
-			renderer, err := NewTimetableRenderer(&timetable)
+			if len(timetable.Timetable.Routes) == 0 || len(timetable.Timetable.Routes[0].Schedules) == 0 {
+				t.Fatalf("Test data missing routes or schedules")
+			}
+			route := timetable.Timetable.Routes[0]
+			schedule := route.Schedules[0]
+
+			renderer, err := NewTimetableRenderer(&timetable, route, schedule)
 			if err != nil {
 				t.Fatalf("Failed to create renderer: %v", err)
 			}

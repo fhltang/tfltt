@@ -63,7 +63,7 @@ func main() {
 	// Create client
 	tflClient := client.New(transport, strfmt.Default)
 
-	http.HandleFunc("/", DefaultHandler(tflClient))
+	http.HandleFunc("/{$}", DefaultHandler(tflClient))
 
 	http.HandleFunc("/timetable", TimetableHandler(tflClient))
 

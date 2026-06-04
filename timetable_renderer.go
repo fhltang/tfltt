@@ -212,128 +212,109 @@ func (tr *TimetableRenderer) RenderAsText(maxJourneys int, stationColWidth int) 
 	prefixJourneys := journeys[:prefix]
 	suffixJourneys := journeys[suffixStart:]
 
-	// Header row
+	// Annotation row (separate line above column headers, only when compressed block exists)
+	if block != nil {
+		prefixWidth := stationColWidth + len(prefixJourneys)*(colWidth+3)
+		compWidth := len(block.minuteJourneys) * (compColWidth + 3)
+		lastJ := journeys[suffixStart-1]
+		lh, lm := 0, 0
+		fmt.Sscanf(lastJ.Hour, "%d", &lh)
+		fmt.Sscanf(lastJ.Minute, "%d", &lm)
+		untilLabel := fmt.Sprintf("until %02d:%02d", lh, lm)
+		fmt.Fprintf(&sb, "%-*s", prefixWidth, "")
+		fmt.Fprintf(&sb, "%-*s", compWidth, "then at these minutes past every hour")
+		fmt.Fprintf(&sb, " | %-*s", colWidth, untilLabel)
+		fmt.Fprint(&sb, "\n")
+	}
+
+	// Column-label header row
 	fmt.Fprintf(&sb, "%-*s", stationColWidth, "Station")
 	for i := range prefixJourneys {
 		fmt.Fprintf(&sb, " | %-*s", colWidth, fmt.Sprintf("Train %d", i+1))
 	}
 	if block != nil {
-		compressedWidth := len(block.minuteJourneys) * (compColWidth + 3)
-		fmt.Fprintf(&sb, " | %-*s", compressedWidth-3, "then at these minutes past every hour")
 		for _, mj := range block.minuteJourneys {
 			fmt.Fprintf(&sb, " | %-*d", compColWidth, mj.minute)
 		}
-		lastJ := journeys[suffixStart-1]
-		lh, lm := 0, 0
-		fmt.Sscanf(lastJ.Hour, "%d", &lh)
-		fmt.Sscanf(lastJ.Minute, "%d", &lm)
-		fmt.Fprintf(&sb, " | until %02d:%02d", lh, lm)
+	}
+	suffixOffset := prefix
+	if block != nil {
+		suffixOffset = prefix + len(block.minuteJourneys)
 	}
 	for i := range suffixJourneys {
-		fmt.Fprintf(&sb, " | %-*s", colWidth, fmt.Sprintf("Train %d", prefix+len(block.minuteJourneys)+i+1))
+		fmt.Fprintf(&sb, " | %-*s", colWidth, fmt.Sprintf("Train %d", suffixOffset+i+1))
 	}
 	fmt.Fprint(&sb, "\n")
 
 	// Separator
 	totalWidth := stationColWidth + len(prefixJourneys)*(colWidth+3)
 	if block != nil {
-		bannerWidth := len(block.minuteJourneys)*(compColWidth+3) + (compColWidth + 3) // banner cell + until cell
-		totalWidth += (len(block.minuteJourneys) * (compColWidth + 3)) + bannerWidth
+		totalWidth += len(block.minuteJourneys) * (compColWidth + 3)
 	}
 	totalWidth += len(suffixJourneys) * (colWidth + 3)
 	fmt.Fprint(&sb, strings.Repeat("-", totalWidth))
 	fmt.Fprint(&sb, "\n")
 
-	// Data rows
-	tr.renderJourneyColumns(&sb, prefixJourneys, stationColWidth, colWidth)
-	if block != nil {
-		tr.renderCompressedColumns(&sb, block, stationColWidth, compColWidth)
+	// Data rows — single outer loop so each stop produces exactly one line
+	for _, s := range tr.stops {
+		name := s.name
+		if len(name) > stationColWidth {
+			name = name[:stationColWidth-3] + "..."
+		}
+		fmt.Fprintf(&sb, "%-*s", stationColWidth, name)
+
+		writeJourneyCells := func(journeys []*models.TflAPIPresentationEntitiesKnownJourney, cw int) {
+			for _, j := range journeys {
+				offsets, ok := tr.intervalData[j.IntervalID]
+				if !ok {
+					if len(tr.targetRoute.StationIntervals) > 0 {
+						id64, _ := strconv.ParseInt(tr.targetRoute.StationIntervals[0].ID, 10, 32)
+						offsets = tr.intervalData[int32(id64)]
+						ok = true
+					}
+				}
+				if ok {
+					off, found := offsets[s.id]
+					if found {
+						fmt.Fprintf(&sb, " | %-*s", cw, calculateArrivalTime(j.Hour, j.Minute, off))
+					} else {
+						fmt.Fprintf(&sb, " | %-*s", cw, "---")
+					}
+				} else {
+					fmt.Fprintf(&sb, " | %-*s", cw, "err")
+				}
+			}
+		}
+
+		writeJourneyCells(prefixJourneys, colWidth)
+
+		if block != nil {
+			for _, mj := range block.minuteJourneys {
+				offsets, ok := tr.intervalData[mj.intervalID]
+				if !ok {
+					if len(tr.targetRoute.StationIntervals) > 0 {
+						id64, _ := strconv.ParseInt(tr.targetRoute.StationIntervals[0].ID, 10, 32)
+						offsets = tr.intervalData[int32(id64)]
+						ok = true
+					}
+				}
+				if ok {
+					hour := fmt.Sprintf("%d", block.firstHour)
+					minute := fmt.Sprintf("%d", mj.minute)
+					off := offsets[s.id]
+					fmt.Fprintf(&sb, " | %-*d", compColWidth, arrivalMinute(hour, minute, off))
+				} else {
+					fmt.Fprintf(&sb, " | %-*s", compColWidth, "err")
+				}
+			}
+		}
+
+		writeJourneyCells(suffixJourneys, colWidth)
+
+		sb.WriteString("\n")
 	}
-	tr.renderJourneyColumns(&sb, suffixJourneys, stationColWidth, colWidth)
 
 	return sb.String()
-}
-
-func (tr *TimetableRenderer) renderJourneyColumns(
-	sb *strings.Builder,
-	journeys []*models.TflAPIPresentationEntitiesKnownJourney,
-	stationColWidth, colWidth int,
-) {
-	for _, s := range tr.stops {
-		name := s.name
-		if len(name) > stationColWidth {
-			name = name[:stationColWidth-3] + "..."
-		}
-		fmt.Fprintf(sb, "%-*s", stationColWidth, name)
-
-		for _, j := range journeys {
-			offsets, ok := tr.intervalData[j.IntervalID]
-			if !ok {
-				if len(tr.targetRoute.StationIntervals) > 0 {
-					id64, _ := strconv.ParseInt(tr.targetRoute.StationIntervals[0].ID, 10, 32)
-					offsets = tr.intervalData[int32(id64)]
-					ok = true
-				}
-			}
-			if ok {
-				off, found := offsets[s.id]
-				if found {
-					fmt.Fprintf(sb, " | %-*s", colWidth, calculateArrivalTime(j.Hour, j.Minute, off))
-				} else {
-					fmt.Fprintf(sb, " | %-*s", colWidth, "---")
-				}
-			} else {
-				fmt.Fprintf(sb, " | %-*s", colWidth, "err")
-			}
-		}
-		sb.WriteString("\n")
-	}
-}
-
-func (tr *TimetableRenderer) renderCompressedColumns(
-	sb *strings.Builder,
-	block *compressedBlock,
-	stationColWidth, colWidth int,
-) {
-	for _, s := range tr.stops {
-		name := s.name
-		if len(name) > stationColWidth {
-			name = name[:stationColWidth-3] + "..."
-		}
-		fmt.Fprintf(sb, "%-*s", stationColWidth, name)
-
-		for _, mj := range block.minuteJourneys {
-			offsets, ok := tr.intervalData[mj.intervalID]
-			if !ok {
-				if len(tr.targetRoute.StationIntervals) > 0 {
-					id64, _ := strconv.ParseInt(tr.targetRoute.StationIntervals[0].ID, 10, 32)
-					offsets = tr.intervalData[int32(id64)]
-					ok = true
-				}
-			}
-			if ok {
-				hour := fmt.Sprintf("%d", block.firstHour)
-				minute := fmt.Sprintf("%d", mj.minute)
-				off := offsets[s.id]
-				fmt.Fprintf(sb, " | %-*d", colWidth, arrivalMinute(hour, minute, off))
-			} else {
-				fmt.Fprintf(sb, " | %-*s", colWidth, "err")
-			}
-		}
-		sb.WriteString("\n")
-	}
-}
-
-func (tr *TimetableRenderer) renderBannerRow(
-	sb *strings.Builder,
-	block *compressedBlock,
-	stationColWidth, colWidth int,
-	lastDepartureHour, lastDepartureMinute int,
-) {
-	compressedWidth := len(block.minuteJourneys) * (colWidth + 3)
-	fmt.Fprintf(sb, "%-*s", stationColWidth, "")
-	fmt.Fprintf(sb, " | %-*s", compressedWidth-3, "then at these minutes past every hour")
-	fmt.Fprintf(sb, " | until %02d:%02d\n", lastDepartureHour, lastDepartureMinute)
 }
 
 func (tr *TimetableRenderer) RenderAsHtml(maxJourneys int) string {

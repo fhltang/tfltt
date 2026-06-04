@@ -59,6 +59,21 @@ func TestRenderTimetableTable(t *testing.T) {
 				t.Errorf("Output too short, likely failed to render properly")
 			}
 
+			if tc.name == "Amersham (Metropolitan)" {
+				if !strings.Contains(output, "minutes past every hour") {
+					t.Errorf("expected compressed block banner in output")
+				}
+				if !strings.Contains(output, "until") {
+					t.Errorf("expected 'until' label in compressed output")
+				}
+				// Compressed region should show only minute digits, not "Train N" labels
+				compStart := strings.Index(output, "minutes past every hour")
+				compEnd := strings.Index(output, "until")
+				if compStart != -1 && compEnd != -1 && strings.Contains(output[compStart:compEnd], "Train ") {
+					t.Errorf("compressed region should not contain 'Train ' labels")
+				}
+			}
+
 			// Verify HTML placeholder
 			htmlOutput := renderer.RenderAsHtml(20)
 			if !strings.Contains(htmlOutput, "<html>") {
